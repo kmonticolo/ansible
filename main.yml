@@ -1,0 +1,173 @@
+--- 
+
+#-hosts: polecommapp02-test
+# ew zahaszowac hosts i podawac z inventory
+
+# kmonticolo 19.03.15
+# w zmiennej ear ustawic wlasciwa sciezke do paczki sciagnietej z trac
+# deployment:  ansible-playbook -i /home/kmonticolo/ansible/playbooks/vpostest/hosts /home/kmonticolo/ansible/playbooks/vpostest/site.yml -K -e "ear=/home/kmonticolo/Downloads/vpos-2.10.6.zip"
+
+
+- name: Kasowanie logow
+# ZAKOMENTOWAC NA PRODUKCJI!!
+# wojdak mowi ze mozna kasowac przy kazdym deploymencie
+  command: rm -rf  /var/log/jboss/*
+  #command: echo >/tmp/kasujlogi
+  #when: ansible_hostname.stdout.find('test') != -1
+  #when: ansible_fqdn.stdout.find('test') != -1
+  when: ( ansible_hostname == "polecommapp01-test" or ansible_hostname == "polecommapp02-test" or ansible_hostname == "polecommapp05-test" or ansible_hostname == "polecommapp06-test" )
+
+
+- name: Usuwanie starych paczek ear z katalogu domowego serwera
+  shell: rm -rf /home/kmonticolo_adm/vpos-*.zip /home/kmonticolo_adm/vpos
+  ignore_errors: yes
+- name: Usuwanie starych paczek ear z /tmp
+  shell: find /tmp -name "vpos-*.ear" -ctime +7 -delete
+  ignore_errors: yes
+
+- name: pakowanie starych logow
+  command: find /var/log/jboss -iname "*.log.[0-9]*[0-9]" -exec gzip {} \;
+  register: gzip
+  ignore_errors: yes
+#- debug: msg="logi spakowane"
+  #when: gzip|changed  
+
+#- name: usuwanie starych logow systemowych z /var/log/
+  #shell: rm -f /var/log/*gz /var/log/*bz2
+  #ignore_errors: yes
+
+# miejsce /var/ /opt i /tmp
+- name: Pobieranie miejsca /var/log/jboss 
+  action: shell df -P /var/log/jboss | awk 'END { print $4 }'
+  register: varlogjboss
+  changed_when: no
+- name: Sprawdzenie min 100MB miejsca na /var/log/jboss
+  action: fail msg="ZWOLNIJ MIEJSCE. Za malo miejsca na logi (jest {{varlogjboss.stdout|int/1024|int}}M, potrzeba przynajmniej 100M)"
+  when: varlogjboss.stdout|int < 100 * 1024
+  ignore_errors: yes
+- name: Pobieranie miejsca /opt/jboss/server/vpos
+  action: shell df -P /opt/jboss/server/vpos | awk 'END { print $4 }'
+  register: optjboss
+  changed_when: no
+- name: Sprawdzenie min. 200MB miejsca na /opt/jboss/server/vpos
+  action: fail msg="ZWOLNIJ MIEJSCE. Za malo miejsca na /opt/jboss/server/vpos (jest {{optjboss.stdout|int/1024|int}}M, potrzeba przynajmniej 200M)"
+  when: optjboss.stdout|int < 200 * 1024
+- name: Pobieranie miejsca /tmp
+  action: shell df -P /tmp | awk 'END { print $4 }'
+  register: tmp
+  changed_when: no
+- name: Sprawdzenie min. 100MB miejsca na /tmp
+  action: fail msg="ZWOLNIJ MIEJSCE. Za malo miejsca na /tmp (jest {{tmp.stdout|int/1024|int}}M, potrzeba przynajmniej 100M)"
+  when: tmp.stdout|int < 100 * 1024
+
+- name: Kopiowanie '{{ ear }}'
+  copy: src='{{ ear }}'  dest=/home/kmonticolo_adm/ owner=kmonticolo_adm group=linuxadm mode=0664
+
+
+- name: Rozpakowanie '{{ ear }}'
+  command: unzip -o /home/kmonticolo_adm/vpos-*.zip -d /home/kmonticolo_adm/
+  #command: unzip -o /home/kmonticolo_adm/vpos-*.zip -d /home/kmonticolo_adm/
+
+- name: Stop JBoss
+  service: name=jboss_ecommerce state=stopped
+  ignore_errors: yes
+  tags:
+     - restart
+     - stop
+
+- name: Backup starego ear
+  shell: mv /opt/jboss/server/vpos/deploy/vpos-[0-9].*.ear /tmp
+  ignore_errors: yes
+
+- name: Deployment ear
+  shell: cp -f /home/kmonticolo_adm/vpos/bin/vpos-*.ear /opt/jboss/server/vpos/deploy/
+
+- name: Deployment ecom-rsc.war
+  #shell: cp -f /home/kmonticolo_adm/vpos/bin/vpos-*.ear /opt/jboss/server/vpos/deploy/
+  shell: rm -rf /opt/jboss/server/vpos/deploy/ecom-rsc.war 
+  shell: cp -pR /home/kmonticolo_adm/vpos/bin/ecom-rsc.war /opt/jboss/server/vpos/deploy/
+
+- name: Deployment xml
+#kopiowanie nowego xmla, nie zawsze jest potrzebne, sprawdzic czy nie dac ignore_errors
+  shell: cp -f /home/kmonticolo_adm/vpos/bin/jms/vpos-service.xml /opt/jboss/server/vpos/deploy/jms/vpos-service.xml
+  #copy: src= /home/kmonticolo_adm/vpos/bin/jms/vpos-service.xml dest=/opt/jboss/server/vpos/deploy/jms/vpos-service.xml owner=jboss group=jboss mode=0644
+#cp /home/kmonticolo_adm/vpos/bin/jms/vpos-service.xml /opt/jboss/server/vpos/deploy/jms/vpos-service.xml
+
+- name: Uprawnienia ear 
+  shell: /bin/chown jboss:jboss /opt/jboss/server/vpos/deploy/vpos-*.ear
+  shell: /bin/chmod 0664 /opt/jboss/server/vpos/deploy/vpos-*.ear
+- name: Uprawnienia ecom-rsc.war
+  shell: /bin/chown -R jboss:jboss /opt/jboss/server/vpos/deploy
+  #shell: /bin/chown -R jboss:jboss /opt/jboss/server/vpos/deploy/ecom-rsc.war
+
+- name: Kasowanie work,tmp
+  shell: rm -rf  /opt/jboss/server/vpos/{tmp/*,work/*}
+  tags:
+     - restart
+     - start
+     - stop
+
+#- name: Kasowanie logow
+# wojdak mowi ze mozna kasowac przy kazdym deploymencie
+  #shell: rm -rf  /var/log/jboss/*
+
+- name: Start JBoss
+  command: /etc/init.d/jboss_ecommerce start
+  tags:
+     - restart
+     - start
+
+# czekaj az w logu pojawi sie "Started in" (timeout do 300s)
+- name: Wait (approx. 2 min) for "Started in"
+  wait_for: path=/var/log/jboss/server.log search_regex=Started\ in
+  changed_when: no
+
+# testy z uzyciem curla, sprobowac dobic sie do konsoli jmx i na aplikacje
+- name: usuniecie pliku /tmp/jmx.html
+  file: path=/tmp/jmx.html state=absent
+
+#- name: JMX vpos test 
+  #command: curl -o /tmp/jmx.html -s -X POST --user 'admin:admin' --data 'action=invokeOp&name=App:service=ThisServiceOp&methodIndex=3&arg0=value1&arg1=value1&submit=Invoke' "http://'{{ ansible_hostname }}':8080/jmx-console/HtmlAdaptor?action=displayMBeans&filter=vpos"
+  #shell: curl -o /tmp/jmx.html -s -X POST --user 'admin:admin' --data 'action=invokeOp&name=App:service=ThisServiceOp&methodIndex=3&arg0=value1&arg1=value1&submit=Invoke' "http://'{{ ansible_hostname }}':8080/jmx-console/HtmlAdaptor?action=displayMBeans&filter=vpos"
+#  ignore_errors: no
+#  changed_when: no
+
+  #get_url:
+    #url=http://'{{ ansible_hostname }}':8080/jmx-console/HtmlAdaptor?action=displayMBeans&filter=vpos
+    #dest=/tmp/jmx.html
+    #url_username=admin
+    #url_password=admin
+    #others='action=invokeOp&name=App:service=ThisServiceOp&methodIndex=3&arg0=value1&arg1=value1&submit=Invoke'
+
+#- name: grepowanie jmx
+#  shell: grep -c name=vpos /tmp/jmx.html
+#  #ignore_errors: yes
+#  register: grep
+#  changed_when: no
+
+#- name: spr. czy jest odpowiednia ilosc wpisow typu vpos na konsoli JMX
+#  action: fail msg="za malo wpisow vpos w konsoli JMX (jest {{grep.stdout|int}}, powinno byc ok 48"
+#  #ignore_errors: yes
+#  when: grep.stdout|int < 40
+##- debug: var=grep.stdout_lines
+
+- name: Test strony vpos test "Please enable javascript"
+  #shell: curl  -Ss http://'{{ ansible_hostname }}':8080/vpos/pl.polcard.vpos.web.common.Common/Common.html | grep -q "Please\ enable\ javascript"
+  #uri: url=http://'{{ ansible_hostname }}':8080/vpos/pl.polcard.vpos.web.common.Common/Common.html return_content=yes 
+  #register: webpage
+  #action: fail 
+  #when: 'Please enable javascript' not in "{{ webpage.content }}"
+  uri: url=http://'{{ ansible_hostname }}':8080/vpos/pl.polcard.vpos.web.common.Common/Common.html return_content=yes
+  #register: webpage
+
+#- action: fail
+    #when: 'Please enable javascript' not in "{{ webpage.content }}"
+
+- name: md5 ear
+  shell: md5sum /opt/jboss/server/vpos/deploy/vpos-*.ear 
+  register: md5
+  changed_when: no
+- debug: var=md5.stdout_lines
+
+#EOF
+
